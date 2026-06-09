@@ -52,11 +52,12 @@ Produce the GitHub Trending Brief in EXACTLY this format (preserve the ### heade
 def _format_repo_block(repo: dict) -> str:
     topics = ", ".join(repo["topics"]) if repo["topics"] else "none"
     readme_section = repo["readme"].strip() if repo["readme"] else "[No README available]"
+    week_stars = repo.get("stars_this_week", 0)
     return (
         f"--- REPO #{repo['rank']} ---\n"
         f"Name: {repo['full_name']}\n"
         f"URL: {repo['url']}\n"
-        f"Stars: {repo['stars']:,}\n"
+        f"Stars: {repo['stars']:,} total (+{week_stars:,} this week)\n"
         f"Language: {repo['language']}\n"
         f"Topics: {topics}\n"
         f"Created: {repo['created_at']}\n"

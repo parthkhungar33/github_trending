@@ -1,18 +1,27 @@
 import base64
 import logging
+import re
 import time
 from datetime import datetime, timezone, timedelta
 
 import requests
+from bs4 import BeautifulSoup
 
-from config import GITHUB_TOKEN
+from config import GITHUB_TOKEN, PROVEN_MIN_STARS
 
 logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.github.com"
+_TRENDING_URL = "https://github.com/trending"
 _HEADERS = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
 if GITHUB_TOKEN:
     _HEADERS["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+
+# github.com/trending is an HTML page, not an API — it expects a browser-ish client.
+_BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; github-trending-pulse/1.0)",
+    "Accept": "text/html,application/xhtml+xml",
+}
 
 
 def _get(url: str, params: dict | None = None) -> dict:
@@ -32,6 +41,42 @@ def _readme(owner: str, repo: str) -> str:
         return ""
 
 
+def _scrape_trending(since: str = "weekly") -> list[dict]:
+    """Scrape github.com/trending for the given window ('daily' | 'weekly' | 'monthly').
+
+    Returns repos in GitHub's trending order — i.e. ranked by stars gained in the
+    window (momentum), not by all-time star count. Each entry carries the
+    'stars_this_week' delta parsed from the page.
+    """
+    resp = requests.get(
+        _TRENDING_URL, params={"since": since}, headers=_BROWSER_HEADERS, timeout=20
+    )
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    entries: list[dict] = []
+    for row in soup.select("article.Box-row"):
+        anchor = row.select_one("h2 a")
+        if not anchor:
+            continue
+        full_name = anchor.get("href", "").strip("/")
+        # Expect exactly "owner/repo"
+        if full_name.count("/") != 1:
+            continue
+
+        # The "N stars this week/today" delta lives in the float-right span.
+        period_stars = 0
+        delta = row.select_one("span.d-inline-block.float-sm-right")
+        if delta:
+            m = re.search(r"([\d,]+)", delta.get_text())
+            if m:
+                period_stars = int(m.group(1).replace(",", ""))
+
+        entries.append({"full_name": full_name, "period_stars": period_stars})
+
+    return entries
+
+
 def _search_repos(created_after: str, min_stars: int, limit: int) -> list[dict]:
     params = {
         "q": f"created:>{created_after} stars:>{min_stars}",
@@ -43,62 +88,83 @@ def _search_repos(created_after: str, min_stars: int, limit: int) -> list[dict]:
     return data.get("items", [])
 
 
-def fetch_trending(top_n: int = 10) -> list[dict]:
-    now = datetime.now(timezone.utc)
-    week_ago = (now - timedelta(days=7)).strftime("%Y-%m-%d")
-    month_ago = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+def _build_result(rank: int, repo: dict, period_stars: int) -> dict:
+    owner = repo["owner"]["login"]
+    name = repo["name"]
+    return {
+        "rank":            rank,
+        "full_name":       repo["full_name"],
+        "url":             repo["html_url"],
+        "stars":           repo["stargazers_count"],
+        "stars_this_week": period_stars,
+        "language":        repo.get("language") or "Unknown",
+        "topics":          repo.get("topics", []),
+        "description":     repo.get("description") or "",
+        "created_at":      repo["created_at"][:10],
+        "readme":          _readme(owner, name),
+    }
 
-    seen: set[str] = set()
-    candidates: list[dict] = []
 
-    # Primary: repos created in last 7 days with at least 50 stars
+def fetch_trending(top_n: int = 10, since: str = "weekly") -> list[dict]:
+    """Top trending repos that are also 'proven'.
+
+    Primary source is github.com/trending (weekly), which ranks by momentum —
+    stars gained this week — so it surfaces established projects catching fire,
+    not just brand-new repos. Each candidate is then enriched via the GitHub API
+    and dropped if its all-time star count is below PROVEN_MIN_STARS.
+
+    If the trending scrape yields nothing (e.g. GitHub changes its HTML), we fall
+    back to the API search so the unattended pipeline still produces a brief.
+    """
+    results: list[dict] = []
+
+    # Primary: scrape the trending page, enrich + filter each in trending order.
     try:
-        hits = _search_repos(week_ago, min_stars=50, limit=15)
-        for h in hits:
-            if h["full_name"] not in seen:
-                seen.add(h["full_name"])
-                candidates.append(h)
-        logger.info(f"fetch.week_query found={len(hits)}")
+        trending = _scrape_trending(since)
+        logger.info(f"trending.scraped since={since} count={len(trending)}")
     except Exception as e:
-        logger.error(f"fetch.week_query failed: {e}")
+        logger.error(f"trending.scrape failed: {e}")
+        trending = []
 
-    # Fallback / supplement: broader 30-day window with higher bar (500+ stars)
-    # Fills gaps when the 7-day window has fewer than top_n results
-    if len(candidates) < top_n:
+    for entry in trending:
+        if len(results) >= top_n:
+            break
+        full_name = entry["full_name"]
         try:
-            time.sleep(1)
-            hits = _search_repos(month_ago, min_stars=500, limit=15)
-            for h in hits:
-                if h["full_name"] not in seen:
-                    seen.add(h["full_name"])
-                    candidates.append(h)
-            logger.info(f"fetch.month_query found={len(hits)}")
+            repo = _get(f"{_API_BASE}/repos/{full_name}")
         except Exception as e:
-            logger.error(f"fetch.month_query failed: {e}")
+            logger.warning(f"meta.skip {full_name}: {e}")
+            continue
 
-    # Sort by stars and take top_n
-    candidates.sort(key=lambda r: r["stargazers_count"], reverse=True)
-    top = candidates[:top_n]
+        stars = repo.get("stargazers_count", 0)
+        if stars < PROVEN_MIN_STARS:
+            logger.info(f"proven_filter.skip {full_name} stars={stars:,} < {PROVEN_MIN_STARS:,}")
+            continue
 
-    results = []
-    for i, repo in enumerate(top):
+        rank = len(results) + 1
+        logger.info(
+            f"fetch.repo #{rank}: {full_name} "
+            f"({stars:,} ⭐, +{entry['period_stars']:,} this week)"
+        )
+        results.append(_build_result(rank, repo, entry["period_stars"]))
+        time.sleep(0.5)
+
+    if results:
+        return results
+
+    # Fallback: API search for proven repos created in the last 30 days.
+    logger.warning("trending produced 0 results — falling back to API search")
+    month_ago = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+    try:
+        hits = _search_repos(month_ago, min_stars=PROVEN_MIN_STARS, limit=top_n)
+    except Exception as e:
+        logger.error(f"fallback.search failed: {e}")
+        return []
+
+    for i, repo in enumerate(hits[:top_n]):
         if i > 0:
             time.sleep(0.5)
-
-        owner = repo["owner"]["login"]
-        name = repo["name"]
-        logger.info(f"fetch.repo #{i+1}: {owner}/{name} ({repo['stargazers_count']:,} ⭐)")
-
-        results.append({
-            "rank":        i + 1,
-            "full_name":   repo["full_name"],
-            "url":         repo["html_url"],
-            "stars":       repo["stargazers_count"],
-            "language":    repo.get("language") or "Unknown",
-            "topics":      repo.get("topics", []),
-            "description": repo.get("description") or "",
-            "created_at":  repo["created_at"][:10],
-            "readme":      _readme(owner, name),
-        })
+        logger.info(f"fallback.repo #{i+1}: {repo['full_name']} ({repo['stargazers_count']:,} ⭐)")
+        results.append(_build_result(i + 1, repo, 0))
 
     return results
