@@ -6,6 +6,35 @@ No more scrolling through `github.com/trending` and guessing what a repo is from
 
 ---
 
+## Why I built this (a product manager's problem)
+
+As a product manager, my job depends on knowing where the technology is heading *before* it shows up in a competitor's release notes or a customer's feature request. But staying current with open source is genuinely hard:
+
+- **The signal is buried in noise.** `github.com/trending` is a wall of repo names and star counts. Most of them are toy projects, one-week hype, or renamed forks. Figuring out which ones actually matter means opening a dozen tabs and reading READMEs I don't have time for.
+- **Raw stars lie.** A repo with 40k stars that's been around for five years isn't a *trend* — it's a fixture. What I care about is *momentum*: what is gaining traction right now, and is it credible enough to bet attention on?
+- **I don't need code — I need meaning.** I don't want a diff. I want to know: what does this do, what problem does it solve, and *should my team care?*
+
+This pipeline turns that hour-long weekly chore into a two-minute read.
+
+### How it helps me as a PM
+
+- **Competitive & market radar.** Surfaces the tools, frameworks, and infrastructure developers are adopting *this week* — often the earliest visible signal of a shift my roadmap should account for.
+- **Answers the PM questions, not the engineer questions.** Every repo is framed as **What it does · Why it's interesting · Who it's for** — the language of positioning, use cases, and target users, not implementation.
+- **Spots the theme, not just the items.** The closing "This Week's Theme" section names the *pattern* across the week's repos (e.g. "AI agent frameworks are consolidating"), which is exactly the altitude a PM needs for strategy conversations.
+- **Zero maintenance.** It runs itself on a schedule and lands in my inbox. Staying informed becomes a default, not a task I have to remember.
+
+### How it uniquely captures the *right* signal
+
+Most "trending" tools just re-list GitHub's page. This pipeline filters for signal deliberately:
+
+- **Momentum over vanity.** It reads the *weekly* trending window — repos ranked by **stars gained this week**, not lifetime totals — so it catches what's accelerating, not what's already famous.
+- **A "proven" credibility floor.** It drops anything below a configurable star threshold (`PROVEN_MIN_STARS`, default 1,000), filtering out weekend experiments and hype spikes so I only see projects with real adoption behind the momentum. **Established projects catching fire** — the sweet spot — rise to the top.
+- **Meaning, not metadata.** Instead of dumping stats, it feeds each repo's actual README to an LLM that explains it in plain product language and connects it to a broader trend — turning data into a decision-ready brief.
+
+The result: a signal that's *early* (momentum-based), *credible* (star-floored), and *legible* (explained for a non-engineer decision-maker).
+
+---
+
 ## What it does
 
 Every week the pipeline runs end-to-end:
