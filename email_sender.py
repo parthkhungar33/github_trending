@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import html
 import re
 import logging
 
@@ -71,9 +74,14 @@ def _body_to_html(md: str) -> str:
         stripped = line.strip()
         if not stripped:
             continue
-        processed = _inline_md(stripped)
-        if processed.startswith('<'):
-            result.append(processed)
+        # Escape first so stray "<" or "&" in LLM text can't break the email layout.
+        processed = _inline_md(html.escape(stripped, quote=False))
+        if processed.startswith('<strong>PM takeaway'):
+            result.append(
+                f'<p style="margin:10px 0 8px;padding:8px 12px;background:#fff8c5;'
+                f'border-left:3px solid #d4a72c;border-radius:4px;line-height:1.55;'
+                f'color:#1a1a1a;font-size:13px;">{processed}</p>'
+            )
         else:
             result.append(
                 f'<p style="margin:0 0 8px;line-height:1.55;color:#444;font-size:13px;">'
@@ -82,8 +90,12 @@ def _body_to_html(md: str) -> str:
     return '\n'.join(result)
 
 
-def _render_repo_card(raw: str) -> str:
-    """Render a single repo section (everything after '### ') as an HTML card."""
+def _render_repo_card(raw: str, repo_data: dict[str, dict]) -> str:
+    """Render a single repo section (everything after '### ') as an HTML card.
+
+    Stats come from the fetched repo data when the name matches, so the numbers
+    are always exact rather than whatever the LLM copied into its header.
+    """
     lines = raw.strip().split('\n')
     header = lines[0].strip()
 
@@ -96,6 +108,13 @@ def _render_repo_card(raw: str) -> str:
     repo_name = m.group(2).strip() if m else header.lstrip('#').strip()
     stars     = m.group(3) if m else ""
     language  = m.group(4).strip() if m else ""
+    week_gain = 0
+
+    data = repo_data.get(repo_name.lower())
+    if data:
+        stars     = f"{data['stars']:,}"
+        language  = data["language"]
+        week_gain = data.get("stars_this_week", 0)
 
     # Line 1 is the bare GitHub URL (if present)
     github_url = ""
@@ -114,6 +133,9 @@ def _render_repo_card(raw: str) -> str:
         f'font-size:12px;font-weight:700;padding:0 2px;">{rank}</span>'
     )
 
+    if not github_url and data:
+        github_url = data["url"]
+
     if github_url:
         name_html = (
             f'<a href="{github_url}" style="color:#0d1117;text-decoration:none;'
@@ -123,9 +145,13 @@ def _render_repo_card(raw: str) -> str:
         name_html = f'<span style="font-weight:700;font-size:15px;">{repo_name}</span>'
 
     meta_parts = []
+    if week_gain:
+        meta_parts.append(
+            f'<span style="color:#1a7f37;font-weight:700;font-size:12px;">▲ +{week_gain:,} this week</span>'
+        )
     if stars:
         meta_parts.append(
-            f'<span style="color:#9a6700;font-weight:600;font-size:12px;">⭐ {stars} stars</span>'
+            f'<span style="color:#9a6700;font-weight:600;font-size:12px;">⭐ {stars} total</span>'
         )
     if language and language != "Unknown":
         meta_parts.append(_lang_badge(language))
@@ -168,22 +194,26 @@ def _render_theme_section(content: str) -> str:
     )
 
 
-def _build_html(brief_md: str, brief_date: str) -> str:
-    # Split on ### boundaries to get individual sections
+def build_html(brief_md: str, brief_date: str, repos: list[dict] | None = None) -> str:
+    repo_data = {r["full_name"].lower(): r for r in (repos or [])}
+
+    # The theme is a "## 📊 ..." heading (any heading level). Split it off first so
+    # it doesn't get swallowed into the last repo card.
+    theme_html = ""
+    theme_split = re.split(r'\n#{2,3}\s*📊[^\n]*\n', brief_md, maxsplit=1)
+    if len(theme_split) == 2:
+        brief_md, theme_md = theme_split
+        theme_html = _render_theme_section(theme_md.strip())
+
+    # Split on ### boundaries to get individual repo sections
     raw_sections = re.split(r'\n(?=### )', brief_md)
 
     intro_block = raw_sections[0]  # "## 🚀..." heading + teaser sentence
     repo_cards_html = ""
-    theme_html = ""
 
     for sec in raw_sections[1:]:
         content = sec[4:] if sec.startswith('### ') else sec  # strip leading "### "
-        if content.startswith('📊') or content.lower().startswith("this week"):
-            theme_html = _render_theme_section(
-                re.sub(r'^[^\n]+\n', '', content, count=1).strip()
-            )
-        else:
-            repo_cards_html += _render_repo_card(content)
+        repo_cards_html += _render_repo_card(content, repo_data)
 
     # Extract the teaser sentence (line after the ## heading)
     teaser = ""
@@ -209,7 +239,7 @@ def _build_html(brief_md: str, brief_date: str) -> str:
 
     <div style="background:#0d1117;border-radius:8px 8px 0 0;padding:24px 28px;">
       <h1 style="margin:0;color:#fff;font-size:22px;font-weight:700;">🚀 GitHub Trending</h1>
-      <p style="margin:2px 0 0;color:rgba(255,255,255,0.5);font-size:12px;">Top 10 repos · Week of {brief_date}</p>
+      <p style="margin:2px 0 0;color:rgba(255,255,255,0.5);font-size:12px;">Top {len(raw_sections) - 1} rising repos · Week of {brief_date}</p>
       {teaser_html}
     </div>
 
@@ -227,8 +257,8 @@ def _build_html(brief_md: str, brief_date: str) -> str:
 </html>"""
 
 
-def send_brief(brief_md: str, brief_date: str) -> None:
-    html = _build_html(brief_md, brief_date)
+def send_brief(brief_md: str, brief_date: str, repos: list[dict] | None = None) -> None:
+    html = build_html(brief_md, brief_date, repos)
     subject = f"🚀 GitHub Trending — Week of {brief_date}"
 
     response = resend.Emails.send({
@@ -254,7 +284,7 @@ https://github.com/anthropics/claude-engineer
 
 **What it does:** An open-source CLI that wraps Claude's API into an autonomous coding agent — you describe what to build and it writes, runs, and iterates on code in a sandboxed environment until tests pass.
 
-**Why it's interesting:** Unlike GitHub Copilot (autocomplete), this operates at the task level: it reads your codebase, proposes a plan, writes the code, runs it, reads the error, and fixes it — all without human intervention between steps.
+**Why it's rising:** Unlike GitHub Copilot (autocomplete), this operates at the task level: it reads your codebase, proposes a plan, writes the code, runs it, reads the error, and fixes it — all without human intervention between steps.
 
 **Who it's for:** Backend engineers who want to automate boilerplate-heavy tasks like writing database migrations, API clients, or test suites.
 
@@ -263,7 +293,7 @@ https://github.com/zig-lang/zig
 
 **What it does:** A general-purpose compiled systems language designed to replace C — no hidden allocations, no undefined behavior, and a compile-time execution model that eliminates entire classes of runtime bugs.
 
-**Why it's interesting:** The 0.14 release ships a self-hosted compiler (Zig now compiles itself), cutting compile times by 40% and removing the C bootstrap dependency entirely.
+**Why it's rising:** The 0.14 release ships a self-hosted compiler (Zig now compiles itself), cutting compile times by 40% and removing the C bootstrap dependency entirely.
 
 **Who it's for:** Systems programmers who find Rust's borrow checker too restrictive but still want memory-safe alternatives to C.
 
@@ -271,4 +301,6 @@ https://github.com/zig-lang/zig
 This week's trending repos split cleanly into two camps: AI-augmented developer tooling (agents, code generators, prompt frameworks) and low-level systems runtimes (new languages, async I/O libraries, WebAssembly runtimes). The common thread is developer productivity at both extremes — abstracting away complexity at the top, and eliminating runtime overhead at the bottom.
 """
 
-    send_brief(sample, str(date.today()))
+    from pathlib import Path
+    Path("preview.html").write_text(build_html(sample, str(date.today())))
+    print("Wrote preview.html")

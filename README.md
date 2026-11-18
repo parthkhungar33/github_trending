@@ -19,7 +19,7 @@ This pipeline turns that hour-long weekly chore into a two-minute read.
 ### How it helps me as a PM
 
 - **Competitive & market radar.** Surfaces the tools, frameworks, and infrastructure developers are adopting *this week* — often the earliest visible signal of a shift my roadmap should account for.
-- **Answers the PM questions, not the engineer questions.** Every repo is framed as **What it does · Why it's interesting · Who it's for** — the language of positioning, use cases, and target users, not implementation.
+- **Answers the PM questions, not the engineer questions.** Every repo is framed as **What it does · Why it's rising · Who it's for · PM takeaway** — the language of positioning, use cases, and target users, not implementation.
 - **Spots the theme, not just the items.** The closing "This Week's Theme" section names the *pattern* across the week's repos (e.g. "AI agent frameworks are consolidating"), which is exactly the altitude a PM needs for strategy conversations.
 - **Zero maintenance.** It runs itself on a schedule and lands in my inbox. Staying informed becomes a default, not a task I have to remember.
 
@@ -41,7 +41,7 @@ Every week the pipeline runs end-to-end:
 
 1. **Fetch** — Scrapes [github.com/trending](https://github.com/trending) for the weekly window, so repos are ranked by *momentum* (stars gained this week), not just all-time star count. Each candidate is enriched with metadata and its README via the GitHub API.
 2. **Filter** — Drops repos below a configurable "proven" star floor (`PROVEN_MIN_STARS`, default 1,000), favouring established projects catching fire over brand-new viral flashes. If the scrape ever fails, it falls back to the GitHub Search API so the unattended run still produces a brief.
-3. **Synthesise** — Sends each repo's stats + README to an LLM (via [OpenRouter](https://openrouter.ai)) that writes a structured card for each: **What it does · Why it's interesting · Who it's for**, plus a closing "This Week's Theme" section identifying the broader trend.
+3. **Synthesise** — Sends each repo's stats + README to an LLM (via [OpenRouter](https://openrouter.ai)) that writes a structured card for each: **What it does · Why it's rising · Who it's for · PM takeaway**, plus a closing "This Week's Theme" section identifying the broader trend.
 4. **Send** — Renders the brief into a clean, responsive HTML email (GitHub-style dark header, per-repo cards, language badges) and delivers it via [Resend](https://resend.com). If any critical step fails, it emails a failure notification instead of dying silently.
 
 The whole thing runs unattended on a **GitHub Actions cron schedule** — no server required.
@@ -54,8 +54,9 @@ Each repo becomes a card like:
 
 > ### #1. anthropics/claude-engineer ⭐ 9,412 · Python
 > **What it does:** An open-source CLI that wraps Claude's API into an autonomous coding agent...
-> **Why it's interesting:** Unlike autocomplete tools, this operates at the task level...
+> **Why it's rising:** Unlike autocomplete tools, this operates at the task level...
 > **Who it's for:** Backend engineers who want to automate boilerplate-heavy tasks...
+> **PM takeaway:** Expect customers to ask for task-level automation, not just suggestions...
 
 Followed by a **📊 This Week's Theme** summary tying the week's repos together.
 
@@ -65,7 +66,8 @@ Followed by a **📊 This Week's Theme** summary tying the week's repos together
 
 | File | Responsibility |
 |------|----------------|
-| [main.py](main.py) | Pipeline orchestration — fetch → synthesise → send, with retries and failure alerts |
+| [main.py](main.py) | Pipeline orchestration — fetch → synthesise → send, with retries, failure alerts, `--dry-run` and duplicate-send guard |
+| [history.py](history.py) | Reads/writes `history.json` — recently featured repos and dates already sent |
 | [github_fetcher.py](github_fetcher.py) | Scrapes trending, enriches via GitHub API, applies the "proven" filter, API fallback |
 | [prompts.py](prompts.py) | System + user prompts and the strict output format for the LLM |
 | [email_sender.py](email_sender.py) | Markdown → responsive HTML email rendering and Resend delivery |
@@ -89,24 +91,30 @@ Create a `.env` file (or set repository secrets for GitHub Actions):
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `OPENROUTER_API_KEY` | ✅ | API key for [OpenRouter](https://openrouter.ai) |
-| `OPENROUTER_MODEL` | ✅ | Model slug, e.g. `anthropic/claude-sonnet-4` |
+| `OPENROUTER_MODEL` | ✅ | Model slug, e.g. `anthropic/claude-sonnet-5.5` |
 | `RESEND_API_KEY` | ✅ | API key for [Resend](https://resend.com) |
 | `FROM_EMAIL` | ✅ | Verified sender address |
 | `TO_EMAIL` | ✅ | Recipient address |
 | `GITHUB_TOKEN` | ⬜ | Optional — raises the GitHub API rate limit from 60 to 5,000 req/hr |
 | `PROVEN_MIN_STARS` | ⬜ | Minimum all-time stars to include a repo (default `1000`) |
+| `REPEAT_COOLDOWN_WEEKS` | ⬜ | Skip repos featured in any brief within this many weeks (default `4`, `0` disables) |
+| `READER_CONTEXT` | ⬜ | One or two sentences about your company/product, so the "PM takeaway" lines can tie trends to it. Keep it in a secret — this repo is public |
 
 ### 3. Run it
 
 ```bash
-python main.py
+python main.py --dry-run   # generate the brief and write preview.html — no email sent
+python main.py             # generate and email it
+python main.py --force     # resend even if today's brief was already sent
 ```
 
 ---
 
 ## Automated scheduling
 
-The included GitHub Actions workflow runs the pipeline **every Tuesday at 9:00 AM IST** and can also be triggered manually from the Actions tab. Add the environment variables above as **repository secrets** (`Settings → Secrets and variables → Actions`) and the newsletter runs itself — no infrastructure to maintain.
+The included GitHub Actions workflow runs the pipeline **every Tuesday at 9:00 AM IST** and can also be triggered manually from the Actions tab (tick **force** to resend a brief already sent that day).
+
+After each successful send, the workflow commits `history.json`, a record of which repos each brief featured. This lets the next run skip recently featured repos, prevents duplicate sends on the same day, and keeps the repo active, so GitHub never auto-disables the schedule after 60 days without commits. Add the environment variables above as **repository secrets** (`Settings → Secrets and variables → Actions`) and the newsletter runs itself — no infrastructure to maintain.
 
 ---
 

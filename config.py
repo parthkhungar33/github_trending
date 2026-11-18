@@ -25,3 +25,10 @@ OPENROUTER_MODEL   = _require("OPENROUTER_MODEL")
 RESEND_API_KEY     = _require("RESEND_API_KEY")
 FROM_EMAIL         = _require("FROM_EMAIL")
 TO_EMAIL           = _require("TO_EMAIL")
+
+# Skip repos that were featured in any brief within this many weeks (0 = never skip).
+REPEAT_COOLDOWN_WEEKS = int(_optional("REPEAT_COOLDOWN_WEEKS", "4"))
+
+# Optional one-or-two-sentence description of the reader's company/product, so the
+# LLM can tie "PM takeaway" lines to it. Keep it in a secret, not in this public repo.
+READER_CONTEXT     = _optional("READER_CONTEXT")

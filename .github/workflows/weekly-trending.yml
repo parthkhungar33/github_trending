@@ -4,6 +4,19 @@ on:
   schedule:
     - cron: "30 3 * * 2"    # Every Tuesday 9:00 AM IST (3:30 AM UTC)
   workflow_dispatch:          # Manual trigger from GitHub UI
+    inputs:
+      force:
+        description: "Send even if this week's brief was already sent today"
+        type: boolean
+        default: false
+
+# Never run two sends at once (e.g. a manual trigger overlapping the cron).
+concurrency:
+  group: trending-pulse
+  cancel-in-progress: false
+
+permissions:
+  contents: write             # lets the job commit history.json back to the repo
 
 jobs:
   send-brief:
@@ -11,10 +24,10 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -30,4 +43,19 @@ jobs:
           RESEND_API_KEY:     ${{ secrets.RESEND_API_KEY }}
           FROM_EMAIL:         ${{ secrets.FROM_EMAIL }}
           TO_EMAIL:           ${{ secrets.TO_EMAIL }}
+          READER_CONTEXT:     ${{ secrets.READER_CONTEXT }}   # optional
+          FORCE_SEND:         ${{ inputs.force }}
         run: python main.py
+
+      # Commit the updated history so next week knows what was already featured.
+      # This weekly commit also keeps the repo "active", so GitHub never auto-disables
+      # the schedule after 60 days of no commits (which is what broke it in Sept 2026).
+      - name: Save history
+        run: |
+          if [ -n "$(git status --porcelain history.json)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add history.json
+            git commit -m "Record brief for $(date -u +%F)"
+            git push
+          fi

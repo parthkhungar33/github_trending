@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import logging
 import re
@@ -30,12 +32,32 @@ def _get(url: str, params: dict | None = None) -> dict:
     return resp.json()
 
 
+README_CHARS = 4000
+
+
+def _clean_readme(text: str) -> str:
+    """Strip the parts of a README that carry no meaning for the LLM.
+
+    READMEs often open with HTML wrappers, logos, badge rows and image links; left
+    in, they eat most of the excerpt before any real description appears.
+    """
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)                 # HTML comments
+    text = re.sub(r"\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)", "", text)       # linked badges
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)                    # images
+    text = re.sub(r"<img[^>]*>", "", text, flags=re.I)
+    text = re.sub(r"</?[a-zA-Z][^>]*>", "", text)                       # remaining HTML tags
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)                # links -> link text
+    text = re.sub(r"^\s*\|?[\s|:-]+\|?\s*$", "", text, flags=re.M)        # table separators
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def _readme(owner: str, repo: str) -> str:
     try:
         data = _get(f"{_API_BASE}/repos/{owner}/{repo}/readme")
         content = base64.b64decode(data["content"]).decode("utf-8", errors="ignore")
-        # Truncate to first 2500 chars — enough context without blowing the LLM prompt
-        return content[:2500]
+        return _clean_readme(content)[:README_CHARS]
     except Exception as e:
         logger.warning(f"readme.skip {owner}/{repo}: {e}")
         return ""
@@ -105,7 +127,9 @@ def _build_result(rank: int, repo: dict, period_stars: int) -> dict:
     }
 
 
-def fetch_trending(top_n: int = 10, since: str = "weekly") -> list[dict]:
+def fetch_trending(
+    top_n: int = 10, since: str = "weekly", exclude: set[str] | None = None
+) -> list[dict]:
     """Top trending repos that are also 'proven'.
 
     Primary source is github.com/trending (weekly), which ranks by momentum —
@@ -115,7 +139,11 @@ def fetch_trending(top_n: int = 10, since: str = "weekly") -> list[dict]:
 
     If the trending scrape yields nothing (e.g. GitHub changes its HTML), we fall
     back to the API search so the unattended pipeline still produces a brief.
+
+    `exclude` holds repo names featured in recent briefs; they are skipped so each
+    week's email surfaces new projects instead of the same fixtures.
     """
+    exclude = {name.lower() for name in (exclude or set())}
     results: list[dict] = []
 
     # Primary: scrape the trending page, enrich + filter each in trending order.
@@ -130,6 +158,9 @@ def fetch_trending(top_n: int = 10, since: str = "weekly") -> list[dict]:
         if len(results) >= top_n:
             break
         full_name = entry["full_name"]
+        if full_name.lower() in exclude:
+            logger.info(f"recent_filter.skip {full_name} (featured in a recent brief)")
+            continue
         try:
             repo = _get(f"{_API_BASE}/repos/{full_name}")
         except Exception as e:
@@ -156,11 +187,12 @@ def fetch_trending(top_n: int = 10, since: str = "weekly") -> list[dict]:
     logger.warning("trending produced 0 results — falling back to API search")
     month_ago = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
     try:
-        hits = _search_repos(month_ago, min_stars=PROVEN_MIN_STARS, limit=top_n)
+        hits = _search_repos(month_ago, min_stars=PROVEN_MIN_STARS, limit=top_n * 3)
     except Exception as e:
         logger.error(f"fallback.search failed: {e}")
         return []
 
+    hits = [h for h in hits if h["full_name"].lower() not in exclude]
     for i, repo in enumerate(hits[:top_n]):
         if i > 0:
             time.sleep(0.5)
