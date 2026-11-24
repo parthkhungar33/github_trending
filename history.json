@@ -11,6 +11,15 @@
       "alibaba/open-code-review",
       "vercel-labs/agent-browser",
       "ChromeDevTools/chrome-devtools-mcp"
+    ],
+    "2026-11-24": [
+      "google-labs-code/stitch-skills",
+      "mvanhorn/last30days-skill",
+      "tradermonty/claude-trading-skills",
+      "ag-ui-protocol/ag-ui",
+      "pookjw/HermesEnabler",
+      "dream-num/univer",
+      "kajisho5/ffmpeg-skill"
     ]
   }
 }
